@@ -28,7 +28,7 @@ except Exception:
     pass
 
 VERSAO = "1.0.0"
-URL_CODIGO = ""  # preencher com o endereço do repositório quando for publicado
+URL_CODIGO = "https://github.com/mikaelvestenasantos-maker/conversor-pdf-epub"
 
 COR_FUNDO = "#f5f3ef"
 COR_ZONA = "#ffffff"
