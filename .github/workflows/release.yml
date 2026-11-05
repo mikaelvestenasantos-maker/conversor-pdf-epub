@@ -1,0 +1,61 @@
+# Ao publicar uma tag "v*" (ex.: v1.0.0), gera os executáveis do Windows
+# para x64 e ARM64 e anexa a um Release do GitHub, junto com a licença.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.arch }}
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: -r requirements.txt pyinstaller
+
+      - name: Gerar executável
+        run: python build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ConversorEPUB-${{ matrix.arch }}
+          path: dist/ConversorEPUB-${{ matrix.arch }}.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publicar release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp LICENSE dist/LICENSE.txt
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --notes "Baixe **ConversorEPUB-x64.exe** (a maioria dos PCs) ou **ConversorEPUB-arm64.exe** (Windows ARM, como Surface Pro X / Snapdragon). Não precisa instalar nada."
