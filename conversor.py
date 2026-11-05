@@ -44,6 +44,13 @@ class Span:
     bold: bool = False
     italic: bool = False
     sup: bool = False
+    page: int = -1
+    nota: int = 0          # >0: chamada da nota de rodapé de número interno `nota`
+    capitular: bool = False
+
+    def copia(self, text: str | None = None) -> "Span":
+        return Span(self.text if text is None else text, self.bold, self.italic, self.sup,
+                    self.page, self.nota, self.capitular)
 
 
 @dataclass
@@ -81,11 +88,14 @@ class Pagina:
 
 @dataclass
 class Elemento:
-    tipo: str  # p | h | img
+    tipo: str  # p | h | img | nota
     spans: list[Span] = field(default_factory=list)
     nivel: int = 0
     classe: str = ""
     imagem: Imagem | None = None
+    pagina: int = -1
+    marcador: str = ""   # para notas: "1", "*", ...
+    nota_id: int = 0
 
 
 class ErroConversao(Exception):
@@ -118,6 +128,7 @@ def extrair_paginas(doc: pymupdf.Document, progresso) -> list[Pagina]:
             linhas_bloco: list[Linha] = []
             for ln in bloco.get("lines", []):
                 spans = []
+                brutos = []  # (tamanho, y da linha de base) de cada trecho
                 tamanhos = Counter()
                 for s in ln["spans"]:
                     t = _normalizar_espacos(s["text"])
@@ -127,11 +138,21 @@ def extrair_paginas(doc: pymupdf.Document, progresso) -> list[Pagina]:
                     bold = bool(s["flags"] & 16) or "bold" in fonte or "black" in fonte or "heavy" in fonte
                     italic = bool(s["flags"] & 2) or "italic" in fonte or "oblique" in fonte
                     sup = bool(s["flags"] & 1)
-                    spans.append(Span(t, bold, italic, sup))
+                    spans.append(Span(t, bold, italic, sup, n))
+                    brutos.append((s["size"], s.get("origin", (0, s["bbox"][3]))[1]))
                     if t.strip():
                         tamanhos[round(s["size"], 1)] += len(t.strip())
                 if not spans or not tamanhos:
                     continue
+                # sobrescrito "desenhado": número pequeno acima da linha de base
+                dominante = tamanhos.most_common(1)[0][0]
+                bases = [b for (tam, b), sp in zip(brutos, spans) if abs(tam - dominante) < 0.3]
+                base = statistics.median(bases) if bases else None
+                for sp, (tam, b) in zip(spans, brutos):
+                    if (not sp.sup and base is not None and tam <= dominante * 0.8
+                            and b < base - dominante * 0.15
+                            and re.fullmatch(r"\d{1,3}|[*†‡§]{1,3}", sp.text.strip())):
+                        sp.sup = True
                 dx, dy = ln.get("dir", (1, 0))
                 if abs(dy) > 0.2:  # texto vertical/rotacionado (marcas laterais)
                     continue
@@ -307,7 +328,7 @@ def marcar_titulos_por_fonte(paginas, corpo) -> None:
 
 def _anexar(spans: list[Span], novos: list[Span]) -> None:
     """Anexa uma linha ao parágrafo, desfazendo hifenização de fim de linha."""
-    novos = [Span(s.text, s.bold, s.italic, s.sup) for s in novos]
+    novos = [s.copia() for s in novos]
     if not novos:
         return
     novos[0].text = novos[0].text.lstrip()
@@ -336,8 +357,12 @@ def _medidas_pagina(linhas: list[Linha], corpo: float):
     corpo_ln = [l for l in linhas if abs(l.size - corpo) <= corpo * 0.15 and len(l.text.strip()) > 20]
     if len(corpo_ln) < 3:
         corpo_ln = [l for l in linhas if l.text.strip()] or linhas
-    xs = sorted(l.x0 for l in corpo_ln)
-    esquerda = Counter(round(x) for x in xs).most_common(1)[0][0] if xs else 0
+    # margem esquerda: a menor posição que se repete (em páginas cheias de
+    # diálogo, as linhas recuadas podem ser maioria)
+    contagem = Counter(round(l.x0) for l in corpo_ln)
+    minimo = max(2, len(corpo_ln) * 0.15) if len(corpo_ln) >= 4 else 1
+    frequentes = sorted(x for x, n in contagem.items() if n >= minimo)
+    esquerda = frequentes[0] if frequentes else (contagem.most_common(1)[0][0] if contagem else 0)
     direita = sorted(l.x1 for l in corpo_ln)[int(len(corpo_ln) * 0.9) - 1] if corpo_ln else 0
     passos = []
     for a, b in zip(corpo_ln, corpo_ln[1:]):
@@ -376,17 +401,36 @@ def montar_elementos(paginas: list[Pagina], corpo: float, pular_paginas: set[int
                 hashes[hashlib.md5(it.data).hexdigest()] += 1
 
     usa_recuo = _livro_usa_recuo(paginas, corpo)
+    notas_pendentes: list[Elemento] = []  # notas de rodapé esperando o parágrafo atual fechar
 
     def fechar():
         nonlocal atual, classe_atual
         if atual and _texto(atual).strip():
             elementos.append(Elemento("p", atual, classe=classe_atual))
         atual, classe_atual = None, ""
+        elementos.extend(notas_pendentes)
+        notas_pendentes.clear()
+
+    def linha_de_nota(ln: Linha):
+        marcador, resto = _separar_marcador(ln.spans)
+        if marcador:
+            nota = Elemento("nota", [], pagina=ln.page, marcador=marcador)
+            _anexar(nota.spans, resto)
+            notas_pendentes.append(nota)
+        elif notas_pendentes and notas_pendentes[-1].pagina == ln.page:
+            _anexar(notas_pendentes[-1].spans, ln.spans)  # continuação da nota
+        else:
+            nota = Elemento("nota", [], pagina=ln.page)
+            _anexar(nota.spans, ln.spans)
+            notas_pendentes.append(nota)
 
     for pg in paginas:
         if pg.numero in pular_paginas:
             continue
         linhas = [it for it in pg.itens if isinstance(it, Linha) and it.papel == "texto"]
+        # rodapé de notas: linhas menores que o corpo, abaixo da última linha do corpo
+        corpo_pg = [l.y1 for l in linhas if abs(l.size - corpo) <= corpo * 0.12 and len(l.text.strip()) > 3]
+        limite_rodape = max(corpo_pg) if corpo_pg else None
         esquerda, direita, passo = _medidas_pagina(linhas, corpo) if linhas else (0, pg.largura, corpo)
         centro = (esquerda + direita) / 2 if linhas else pg.largura / 2
         largura_texto = max(direita - esquerda, 1)
@@ -421,6 +465,11 @@ def montar_elementos(paginas: list[Pagina], corpo: float, pular_paginas: set[int
 
             txt = ln.text.strip()
             if not txt:
+                continue
+
+            if (limite_rodape is not None and ln.y0 >= limite_rodape - 1
+                    and ln.size < corpo * 0.9 and ln.y0 > pg.altura * 0.5):
+                linha_de_nota(ln)
                 continue
 
             # capitular: letra grande isolada no início do parágrafo
@@ -482,7 +531,7 @@ def montar_elementos(paginas: list[Pagina], corpo: float, pular_paginas: set[int
                 if capitular:
                     atual.extend(Span(s.text.strip(), s.bold, s.italic) for s in capitular)
                     capitular = None
-                    atual.extend(Span(s.text, s.bold, s.italic, s.sup) for s in ln.spans)
+                    atual.extend(s.copia() for s in ln.spans)
                     atual[len(atual) - len(ln.spans)].text = atual[len(atual) - len(ln.spans)].text.lstrip()
                 else:
                     _anexar(atual, ln.spans)
@@ -494,19 +543,128 @@ def montar_elementos(paginas: list[Pagina], corpo: float, pular_paginas: set[int
     return elementos
 
 
+_MARCADOR = re.compile(r"^\s*(\d{1,3}|[*†‡§]{1,3})[.)]?(?=\s|[^\w\s]|[A-ZÀ-Ú])\s*")
+
+
+def _separar_marcador(spans: list[Span]) -> tuple[str, list[Span]]:
+    """Separa o número/símbolo do início de uma linha de nota de rodapé."""
+    spans = [s.copia() for s in spans]
+    while spans and not spans[0].text.strip():
+        spans.pop(0)
+    if not spans:
+        return "", spans
+    primeiro = spans[0]
+    if primeiro.sup:
+        m = primeiro.text.strip().rstrip(".)")
+        if re.fullmatch(r"\d{1,3}|[*†‡§]{1,3}", m):
+            return m, spans[1:]
+    # o número pode estar num trecho separado do texto: olha a linha inteira
+    m = _MARCADOR.match(_texto(spans))
+    if m:
+        cortar = m.end()
+        while spans and cortar > 0:
+            if len(spans[0].text) <= cortar:
+                cortar -= len(spans[0].text)
+                spans.pop(0)
+            else:
+                spans[0].text = spans[0].text[cortar:]
+                cortar = 0
+        return m.group(1), spans
+    return "", spans
+
+
+def ligar_notas(elementos: list[Elemento]) -> int:
+    """Liga as chamadas sobrescritas do texto às notas do rodapé da mesma página.
+
+    Notas sem chamada correspondente voltam a ser parágrafos comuns (pequenos).
+    Retorna quantas notas foram ligadas.
+    """
+    notas = {}
+    for e in elementos:
+        if e.tipo == "nota" and e.marcador:
+            notas.setdefault((e.pagina, e.marcador), e)
+    proximo = 1
+    if notas:
+        for e in elementos:
+            if e.tipo not in ("p", "h"):
+                continue
+            for s in e.spans:
+                if not s.sup:
+                    continue
+                m = s.text.strip().rstrip(".,;)")
+                alvo = notas.get((s.page, m))
+                if alvo and not alvo.nota_id:
+                    alvo.nota_id = proximo
+                    s.nota = proximo
+                    s.text = m
+                    proximo += 1
+    for e in elementos:
+        if e.tipo == "nota" and not e.nota_id:
+            e.tipo, e.classe = "p", "nota"
+            if e.marcador:
+                e.spans.insert(0, Span(e.marcador + " "))
+    return proximo - 1
+
+
 # ---------------------------------------------------------------------------
 # 4. Capítulos e EPUB
 # ---------------------------------------------------------------------------
 
+def tipografia(spans: list[Span], lang: str) -> list[Span]:
+    """Aspas curvas, travessões e reticências, sem mexer nas palavras."""
+    travessao = "—" if not lang.startswith("en") else "–"
+    saida = []
+    ant = " "  # caractere anterior, atravessando os trechos
+    for i, s in enumerate(spans):
+        t = s.text
+        if s.sup or s.nota:
+            saida.append(s.copia())
+            ant = t[-1:] or ant
+            continue
+        t = t.replace("...", "…").replace("---", "—").replace("--", "—")
+        t = re.sub(r"(?<=\S) - (?=\S)", f" {travessao} ", t)
+        if i == 0 or not "".join(x.text for x in spans[:i]).strip():
+            # travessão de diálogo no início do parágrafo
+            t = re.sub(r"^(\s*)[-–](\s?)(?=\S)", lambda m: m.group(1) + "— ", t, count=1)
+        chars = []
+        for ch in t:
+            if ch == '"':
+                ch = "“" if (ant.isspace() or ant in "([{—–-/“‘") else "”"
+            elif ch == "'":
+                ch = "‘" if (ant.isspace() or ant in "([{—–-/“") else "’"
+            chars.append(ch)
+            ant = ch
+        saida.append(s.copia("".join(chars)))
+    return saida
+
+
+def marcar_capitular(spans: list[Span]) -> list[Span]:
+    """Destaca a primeira letra do parágrafo (só se começar com letra)."""
+    spans = [s.copia() for s in spans]
+    for i, s in enumerate(spans):
+        t = s.text.lstrip()
+        if not t:
+            continue
+        if not t[0].isalpha() or s.sup:
+            return spans
+        resto = t[1:]
+        spans[i:i + 1] = [s.copia(t[0]), s.copia(resto)]
+        spans[i].capitular = True
+        return spans
+    return spans
+
+
 def _spans_html(spans: list[Span]) -> str:
     # junta trechos vizinhos com o mesmo estilo
+    def chave(s):
+        return (s.bold, s.italic, s.sup, s.nota, s.capitular)
+
     grupos: list[Span] = []
     for s in spans:
-        if grupos and (grupos[-1].bold, grupos[-1].italic, grupos[-1].sup) == (s.bold, s.italic, s.sup):
-            grupos[-1] = Span(grupos[-1].text + s.text, s.bold, s.italic, s.sup)
+        if grupos and chave(grupos[-1]) == chave(s) and not s.nota and not s.capitular:
+            grupos[-1] = grupos[-1].copia(grupos[-1].text + s.text)
         else:
-            grupos.append(Span(s.text, s.bold, s.italic, s.sup))
-    # se o parágrafo inteiro é negrito/itálico, isso é estilo do bloco; mantém
+            grupos.append(s.copia())
     partes = []
     for g in grupos:
         t = html.escape(re.sub(r"\s+", " ", g.text), quote=False)
@@ -516,8 +674,13 @@ def _spans_html(spans: list[Span]) -> str:
         esp_ini = " " if t[0] == " " else ""
         esp_fim = " " if t[-1] == " " else ""
         t = t.strip()
-        if g.sup:
+        if g.nota:
+            t = (f'<sup><a epub:type="noteref" id="r{g.nota}" href="@@NOTA{g.nota}@@" '
+                 f'class="chamada">{t}</a></sup>')
+        elif g.sup:
             t = f"<sup>{t}</sup>"
+        if g.capitular:
+            t = f'<span class="capitular">{t}</span>'
         if g.italic:
             t = f"<i>{t}</i>"
         if g.bold:
@@ -531,10 +694,12 @@ class Capitulo:
     titulo: str
     corpo: list[str] = field(default_factory=list)
     toc: list[tuple[int, str, str]] = field(default_factory=list)  # (nivel, titulo, ancora)
+    notas: list[str] = field(default_factory=list)
     tamanho: int = 0
 
 
-def dividir_capitulos(elementos: list[Elemento], imagens_out: dict) -> list[Capitulo]:
+def dividir_capitulos(elementos: list[Elemento], imagens_out: dict, lang: str = "pt-BR",
+                      capitulares: bool = True) -> list[Capitulo]:
     niveis = [e.nivel for e in elementos if e.tipo == "h"]
     nivel_corte = min(niveis) if niveis else None
     # se só há um título do nível mais alto, divide pelo próximo nível
@@ -544,6 +709,9 @@ def dividir_capitulos(elementos: list[Elemento], imagens_out: dict) -> list[Capi
     cap = Capitulo("Início")
     ancora_n = 0
     LIMITE = 200_000
+    espera_capitular = False
+    onde_ref: dict[int, int] = {}   # nota -> índice do capítulo da chamada
+    onde_nota: dict[int, int] = {}  # nota -> índice do capítulo onde a nota fica
 
     for i, e in enumerate(elementos):
         if e.tipo == "h":
@@ -557,14 +725,31 @@ def dividir_capitulos(elementos: list[Elemento], imagens_out: dict) -> list[Capi
             ancora_n += 1
             ancora = f"t{ancora_n}"
             nivel_html = min(max(e.nivel - (nivel_corte or 1) + 1, 1), 3) if nivel_corte else 2
-            cap.corpo.append(f'<h{nivel_html} id="{ancora}">{_spans_html(e.spans)}</h{nivel_html}>')
+            cap.corpo.append(f'<h{nivel_html} id="{ancora}">{_spans_html(tipografia(e.spans, lang))}</h{nivel_html}>')
             cap.toc.append((e.nivel, titulo, ancora))
+            if nivel_html == 1:
+                espera_capitular = capitulares
         elif e.tipo == "img":
             nome = f"img{len(imagens_out) + 1:04d}.{'jpg' if e.imagem.ext == 'jpeg' else e.imagem.ext}"
             imagens_out[nome] = e.imagem
             cap.corpo.append(f'<div class="imagem"><img src="../images/{nome}" alt=""/></div>')
+        elif e.tipo == "nota":
+            conteudo = _spans_html(tipografia(e.spans, lang))
+            onde_nota[e.nota_id] = len(caps)
+            cap.notas.append(
+                f'<aside epub:type="footnote" id="n{e.nota_id}"><p class="nota">'
+                f'<a href="@@REF{e.nota_id}@@">{html.escape(e.marcador)}</a> {conteudo}</p></aside>'
+            )
         else:
-            conteudo = _spans_html(e.spans)
+            spans = tipografia(e.spans, lang)
+            if espera_capitular and e.classe == "":
+                spans = marcar_capitular(spans)
+            if e.classe not in ("cena",):
+                espera_capitular = False
+            for s in spans:
+                if s.nota:
+                    onde_ref[s.nota] = len(caps)
+            conteudo = _spans_html(spans)
             if not conteudo:
                 continue
             cls = f' class="{e.classe}"' if e.classe else ""
@@ -574,10 +759,26 @@ def dividir_capitulos(elementos: list[Elemento], imagens_out: dict) -> list[Capi
             if cap.tamanho > LIMITE:
                 caps.append(cap)
                 cap = Capitulo(cap.titulo)
-                cap.toc = []
-    if cap.corpo:
+    if cap.corpo or cap.notas:
         caps.append(cap)
-    # primeiro parágrafo após título/separador sem recuo
+
+    # notas no fim de cada capítulo + links entre arquivos quando necessário
+    for idx, c in enumerate(caps):
+        if c.notas:
+            c.corpo.append('<section class="notas" epub:type="footnotes">')
+            c.corpo.extend(c.notas)
+            c.corpo.append("</section>")
+
+    def destino(idx_alvo, idx_atual, ancora):
+        return f"#{ancora}" if idx_alvo == idx_atual else f"cap{idx_alvo + 1:03d}.xhtml#{ancora}"
+
+    for idx, c in enumerate(caps):
+        texto = "\n".join(c.corpo)
+        texto = re.sub(r"@@NOTA(\d+)@@",
+                       lambda m: destino(onde_nota.get(int(m.group(1)), idx), idx, f"n{m.group(1)}"), texto)
+        texto = re.sub(r"@@REF(\d+)@@",
+                       lambda m: destino(onde_ref.get(int(m.group(1)), idx), idx, f"r{m.group(1)}"), texto)
+        c.corpo = [texto]
     return caps
 
 
@@ -598,6 +799,12 @@ p.nota { font-size: 0.85em; text-indent: 0; margin: 0.4em 0; }
 div.imagem { text-align: center; margin: 1em 0; page-break-inside: avoid; }
 div.imagem img { max-width: 100%; height: auto; }
 sup { font-size: 0.7em; line-height: 0; }
+a.chamada { text-decoration: none; }
+span.capitular { float: left; font-size: 3.2em; line-height: 0.85; margin: 0.06em 0.08em 0 0; }
+section.notas { margin-top: 2em; padding-top: 0.5em; border-top: 1px solid #999; }
+aside { margin: 0.4em 0; }
+aside p.nota { margin: 0; }
+aside p.nota a { text-decoration: none; font-weight: bold; }
 body.capa { text-align: center; }
 body.capa img { max-width: 100%; max-height: 100%; }
 """
@@ -761,6 +968,7 @@ class Resultado:
     capitulos: int
     imagens: int
     avisos: list[str]
+    notas: int = 0
 
 
 def ler_metadados(pdf: Path) -> tuple[str, str]:
@@ -775,7 +983,8 @@ def ler_metadados(pdf: Path) -> tuple[str, str]:
 
 def converter(pdf: Path | str, destino: Path | str | None = None, titulo: str | None = None,
               autor: str | None = None, usar_capa: bool = True,
-              progresso: Callable[[float, str], None] | None = None) -> Resultado:
+              progresso: Callable[[float, str], None] | None = None,
+              capitulares: bool = True) -> Resultado:
     pdf = Path(pdf)
     progresso = progresso or (lambda f, m: None)
     destino = Path(destino) if destino else pdf.with_suffix(".epub")
@@ -819,11 +1028,12 @@ def converter(pdf: Path | str, destino: Path | str | None = None, titulo: str | 
 
         progresso(0.75, "Reconstruindo parágrafos")
         elementos = montar_elementos(paginas, corpo, pular)
+        n_notas = ligar_notas(elementos)
 
     lang = detectar_idioma(" ".join(_texto(e.spans) for e in elementos if e.tipo == "p"))
     progresso(0.85, "Montando capítulos")
     imagens: dict[str, Imagem] = {}
-    capitulos = dividir_capitulos(elementos, imagens)
+    capitulos = dividir_capitulos(elementos, imagens, lang, capitulares)
     if not capitulos:
         raise ErroConversao("Não sobrou conteúdo para o EPUB depois da análise.")
     if not any(c.toc for c in capitulos):
@@ -832,7 +1042,7 @@ def converter(pdf: Path | str, destino: Path | str | None = None, titulo: str | 
     progresso(0.93, "Gravando EPUB")
     escrever_epub(destino, titulo, autor, lang, capitulos, imagens, capa)
     progresso(1.0, "Pronto!")
-    return Resultado(destino, titulo, autor, len(paginas), len(capitulos), len(imagens), avisos)
+    return Resultado(destino, titulo, autor, len(paginas), len(capitulos), len(imagens), avisos, n_notas)
 
 
 def main():
@@ -842,10 +1052,12 @@ def main():
     ap.add_argument("--titulo")
     ap.add_argument("--autor")
     ap.add_argument("--sem-capa", action="store_true")
+    ap.add_argument("--sem-capitulares", action="store_true")
     a = ap.parse_args()
     r = converter(a.pdf, a.saida, a.titulo, a.autor, not a.sem_capa,
-                  lambda f, m: print(f"[{f * 100:5.1f}%] {m}"))
-    print(f"\nEPUB criado: {r.destino}\n{r.capitulos} capítulo(s), {r.imagens} imagem(ns), {r.paginas} páginas.")
+                  lambda f, m: print(f"[{f * 100:5.1f}%] {m}"), not a.sem_capitulares)
+    print(f"\nEPUB criado: {r.destino}\n{r.capitulos} capítulo(s), {r.imagens} imagem(ns), "
+          f"{r.notas} nota(s) de rodapé, {r.paginas} páginas.")
     for av in r.avisos:
         print("Aviso:", av)
 

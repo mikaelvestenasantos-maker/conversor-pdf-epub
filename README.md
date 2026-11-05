@@ -18,7 +18,17 @@ Não precisa instalar nada, é só abrir. Como o programa não tem assinatura di
 1. Arraste os PDFs para a janela (ou clique na área para escolher).
 2. Confira título e autor.
 3. Clique em **Converter**. O EPUB é salvo ao lado do PDF.
-4. Mande para o Kindle pelo [Send to Kindle](https://www.amazon.com/sendtokindle): pelo site, pelo e-mail do seu Kindle ou pelo app.
+4. Clique em **Enviar pro Kindle**, ou marque "Enviar ao terminar de converter" para enviar sozinho.
+
+### Enviar direto pro Kindle (Gmail)
+
+Configure uma vez em **Kindle → Configurar…**:
+
+1. **E-mail do Kindle** (termina em `@kindle.com`): na Amazon, em *Conteúdo e dispositivos → Preferências → Configurações de documentos pessoais*.
+2. Na mesma página, adicione o seu Gmail na **Lista de e-mails aprovados**. Sem isso, a Amazon descarta o livro.
+3. **Senha de app** do Gmail: crie em [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Exige a verificação em duas etapas ativada. Não é a senha normal da conta.
+
+A senha fica guardada no Gerenciador de Credenciais do Windows. O livro aparece na biblioteca do Kindle em alguns minutos. Arquivos acima de 25 MB (limite do Gmail) precisam ir pelo site [Send to Kindle](https://www.amazon.com/sendtokindle).
 
 ## O que ele faz
 
@@ -27,6 +37,9 @@ Não precisa instalar nada, é só abrir. Como o programa não tem assinatura di
 - Remove cabeçalhos, rodapés e números de página repetidos.
 - Detecta os capítulos pelo sumário do PDF (bookmarks) ou, na falta dele, pelo tamanho da fonte, e gera o sumário navegável do Kindle.
 - Mantém itálico, negrito, imagens e separadores de cena (`* * *`).
+- Transforma notas de rodapé em notas que abrem numa janelinha no Kindle.
+- Usa aspas curvas (“ ”), apóstrofo (’), travessão de diálogo (—) e reticências (…).
+- Destaca a primeira letra de cada capítulo (capitular), o que pode ser desligado.
 - Usa a 1ª página como capa.
 
 ## Limitações
@@ -67,6 +80,6 @@ Copyright © 2026 mikaelvestenasantos-maker.
 
 Distribuído sob a [GNU Affero General Public License v3](LICENSE). Você pode usar, estudar, modificar e redistribuir, desde que versões modificadas também sejam distribuídas com o código-fonte sob a mesma licença.
 
-Usa [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0) e [windnd](https://github.com/cilame/windnd) (MIT).
+Usa [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0), [windnd](https://github.com/cilame/windnd) (MIT) e [keyring](https://github.com/jaraco/keyring) (MIT).
 
 Kindle é marca registrada da Amazon.com, Inc. Este projeto não tem vínculo com a Amazon.

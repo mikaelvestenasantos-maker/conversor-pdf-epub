@@ -23,6 +23,7 @@ PyInstaller.__main__.run([
     "--noconfirm",
     "--clean",
     "--add-data", f"{RAIZ / 'LICENSE'};.",
+    "--hidden-import", "keyring.backends.Windows",
     "--distpath", str(RAIZ / "dist"),
     "--workpath", str(RAIZ / "build"),
     "--specpath", str(RAIZ / "build"),
