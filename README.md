@@ -59,7 +59,7 @@ pip install pyinstaller
 python build.py
 ```
 
-Ao publicar uma tag `v*` no GitHub (ex.: `v1.0.0`), o workflow em `.github/workflows/release.yml` gera as versões x64 e ARM64 e cria o Release automaticamente.
+Ao publicar um Release no GitHub (ex.: `v1.0.0`), o workflow em `.github/workflows/release.yml` gera as versões x64 e ARM64 e anexa os executáveis ao Release automaticamente.
 
 ## Licença
 

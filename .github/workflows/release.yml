@@ -1,10 +1,10 @@
-# Ao publicar uma tag "v*" (ex.: v1.0.0), gera os executáveis do Windows
-# para x64 e ARM64 e anexa a um Release do GitHub, junto com a licença.
+# Quando um Release é publicado no GitHub (pelo site ou pelo gh), gera os
+# executáveis do Windows para x64 e ARM64 e anexa ao Release, junto com a licença.
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -41,9 +41,9 @@ jobs:
           name: ConversorEPUB-${{ matrix.arch }}
           path: dist/ConversorEPUB-${{ matrix.arch }}.exe
 
-  release:
+  anexar:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,11 +51,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publicar release
+      - name: Anexar executáveis ao Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp LICENSE dist/LICENSE.txt
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "${{ github.ref_name }}" \
-            --notes "Baixe **ConversorEPUB-x64.exe** (a maioria dos PCs) ou **ConversorEPUB-arm64.exe** (Windows ARM, como Surface Pro X / Snapdragon). Não precisa instalar nada."
+          gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber -R "${{ github.repository }}"
